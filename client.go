@@ -10,6 +10,7 @@
 package pulseaudio
 
 import (
+	"bufio"
 	"bytes"
 	"encoding/binary"
 	"fmt"
@@ -20,6 +21,9 @@ import (
 	"os/user"
 	"path"
 	"path/filepath"
+	"strings"
+
+	"github.com/adrg/xdg"
 )
 
 const version = 32
@@ -364,29 +368,112 @@ func RuntimePath(fn string) (string, error) {
 	return "", fmt.Errorf("No valid directory for Pulse RuntimePath found")
 }
 
-func cookiePath() (string, error) {
-
-	p := filepath.Join(os.Getenv("PULSE_COOKIE"))
-	if exists(p) {
-		return p, nil
+func cookiePath() (path string, err error) {
+	// Always use PULSE_COOKIE if it exists
+	path = filepath.Join(os.Getenv("PULSE_COOKIE"))
+	if exists(path) {
+		return
 	}
 
+	configFilePath, err := xdg.SearchConfigFile("pulse/client.conf")
+	if err != nil {
+		return
+	}
+
+	config, err := ReadConfig(configFilePath)
+	if err != nil {
+		return
+	}
+
+	if exists(config.CookieFile) {
+		path = config.CookieFile
+		return
+	}
+
+	// TODO: old stuff, should i still keep this?
 	if confHome := os.Getenv("XDG_CONFIG_HOME"); confHome != "" {
-		cookie := filepath.Join(confHome, "/pulse/cookie")
-		if exists(cookie) {
-			return cookie, nil
+		path = filepath.Join(confHome, "/pulse/cookie")
+		if exists(path) {
+			return
 		}
 	}
 
-	p = filepath.Join(os.Getenv("HOME"), "/.config/pulse/cookie")
-	if exists(p) {
-		return p, nil
+	path = filepath.Join(os.Getenv("HOME"), "/.config/pulse/cookie")
+	if exists(path) {
+		return
 	}
 
-	p = filepath.Join(os.Getenv("HOME"), "/.pulse_cookie")
-	if exists(p) {
-		return p, nil
+	path = filepath.Join(os.Getenv("HOME"), "/.pulse_cookie")
+	if exists(path) {
+		return
 	}
 
-	return "", fmt.Errorf("No valid path for Pulse cookie found")
+	// return "", fmt.Errorf("No valid path for Pulse cookie found")
+
+	err = fmt.Errorf("no valid path for pulse cookie found")
+	return
+}
+
+type Config struct {
+	DefaultSink    string
+	DefaultSource  string
+	DefaultServer  string
+	Autospawn      bool
+	DaemonBinary   string
+	ExtraArguments string
+	Target         string
+	CookieFile     string
+	EnableShm      bool
+	ShmSizeBytes   int
+}
+
+func ReadConfig(configPath string) (config Config, err error) {
+	file, err := os.Open(configPath)
+	if err != nil {
+		return
+	}
+
+	homeDir, err := os.UserHomeDir()
+	if err != nil {
+		return
+	}
+
+	// defaults
+	config.CookieFile = path.Join(homeDir, "/pulse-cookie")
+
+	bufreader := bufio.NewReader(file)
+	var (
+		line     string
+		fragment []byte
+		isPrefix bool
+	)
+	for {
+		fragment, isPrefix, err = bufreader.ReadLine()
+
+		if err == io.EOF {
+			err = nil
+			break
+		}
+
+		if err != nil {
+			err = fmt.Errorf("failed to read from config file: %w", err)
+			return
+		}
+
+		line += string(fragment)
+		if isPrefix {
+			continue
+		}
+
+		eqIdx := strings.Index(line, "=")
+		left := line[:eqIdx]
+		right := line[eqIdx+1:]
+		switch left {
+		case "cookie-file":
+			config.CookieFile = right
+		}
+		line = ""
+	}
+
+	return
 }
